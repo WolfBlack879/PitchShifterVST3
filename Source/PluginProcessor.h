@@ -39,6 +39,7 @@ public:
     juce::AudioProcessorValueTreeState apvts;
 
     enum Mode { studio = 0, live = 1 };
+    enum Width { mono = 0, stereo = 1 };
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
@@ -50,8 +51,10 @@ private:
     std::atomic<float>* mixParam       = nullptr;
     std::atomic<float>* outputParam    = nullptr;
     std::atomic<float>* modeParam      = nullptr;
+    std::atomic<float>* widthParam     = nullptr;
 
     std::atomic<int> currentMode { live };
+    int currentWidth = stereo;
 
     static constexpr int maxChannels = 2;
     PitchShifter shifter;     // studio: high quality, ~75 ms

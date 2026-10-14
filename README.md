@@ -11,6 +11,7 @@ A minimal pitch-shifter plugin tuned for bass guitar and synth bass.
 | Mix    | 0 … 100 %        | Dry/wet blend (dry is latency-aligned, no combing) |
 | Output | −24 … +12 dB     | Output level                                     |
 | Studio / Live | switch    | Choose the engine (see below)                    |
+| Mono / Stereo | switch    | Mono sums L+R and outputs the same signal on both sides (half the CPU, rock-solid centre). Stereo keeps the input's stereo image, with both sides shifted together. |
 
 Double-click any knob to reset it.
 

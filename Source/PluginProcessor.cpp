@@ -12,6 +12,7 @@ BassPitchShifterProcessor::BassPitchShifterProcessor()
     mixParam       = apvts.getRawParameterValue ("mix");
     outputParam    = apvts.getRawParameterValue ("output");
     modeParam      = apvts.getRawParameterValue ("mode");
+    widthParam     = apvts.getRawParameterValue ("width");
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout BassPitchShifterProcessor::createLayout()
@@ -41,6 +42,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout BassPitchShifterProcessor::c
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "mode", 1 }, "Mode",
         StringArray { "Studio", "Live" }, (int) live));
 
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "width", 1 }, "Width",
+        StringArray { "Mono", "Stereo" }, (int) stereo));
+
     return layout;
 }
 
@@ -58,6 +62,7 @@ void BassPitchShifterProcessor::prepareToPlay (double sampleRate, int samplesPer
     liveShifter.prepare (sampleRate);
 
     currentMode = (int) modeParam->load();
+    currentWidth = (int) widthParam->load();
     setLatencySamples (latencyForMode (currentMode.load()));
 
     const int latency = shifter.getLatencySamples();
@@ -96,11 +101,21 @@ void BassPitchShifterProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
 {
     juce::ScopedNoDenormals noDenormals;
 
-    const int numSamples  = buffer.getNumSamples();
-    const int numChannels = juce::jmin (buffer.getNumChannels(), maxChannels);
+    const int numSamples     = buffer.getNumSamples();
+    const int totalChannels  = juce::jmin (buffer.getNumChannels(), maxChannels);
 
     for (int ch = getTotalNumInputChannels(); ch < getTotalNumOutputChannels(); ++ch)
         buffer.clear (ch, 0, numSamples);
+
+    // Mono: sum L+R into the left channel, process that alone, copy it to the right at the end.
+    const int width = (int) widthParam->load();
+    const bool monoSum = width == mono && totalChannels == 2;
+    if (monoSum)
+    {
+        buffer.addFrom (0, 0, buffer, 1, 0, numSamples);
+        buffer.applyGain (0, 0, numSamples, 0.5f);
+    }
+    const int numChannels = monoSum ? 1 : totalChannels;
 
     const float semis = semitonesParam->load() + centsParam->load() * 0.01f;
     const float ratio = std::pow (2.0f, semis / 12.0f);
@@ -109,13 +124,16 @@ void BassPitchShifterProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     gainSmoothed.setTargetValue (juce::Decibels::decibelsToGain (outputParam->load()));
 
     const int mode = (int) modeParam->load();
-    if (mode != currentMode)
+    if (mode != currentMode || width != currentWidth)
     {
+        if (mode != currentMode)
+            triggerAsyncUpdate(); // latency must be changed off the audio thread
+
         currentMode = mode;
+        currentWidth = width;
         shifter.reset();
         liveShifter.reset();
         dryDelay.reset();
-        triggerAsyncUpdate(); // latency must be changed off the audio thread
     }
 
     if (dryBuffer.getNumSamples() < numSamples)
@@ -167,6 +185,9 @@ void BassPitchShifterProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
             wet[i] = (dry + mix * (wet[i] - dry)) * gain;
         }
     }
+
+    if (monoSum)
+        buffer.copyFrom (1, 0, buffer, 0, 0, numSamples);
 }
 
 juce::AudioProcessorEditor* BassPitchShifterProcessor::createEditor()

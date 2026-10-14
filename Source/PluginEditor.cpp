@@ -88,27 +88,14 @@ BassPitchShifterEditor::BassPitchShifterEditor (BassPitchShifterProcessor& p)
     setupKnob (mix,    "mix",       "MIX",    100.0);
     setupKnob (output, "output",    "OUTPUT", 0.0);
 
-    // Studio / Live switch, driven by the "mode" choice parameter.
-    auto* modeParam = processor.apvts.getParameter ("mode");
-    modeAttachment = std::make_unique<juce::ParameterAttachment> (*modeParam,
-        [this] (float value) { modeChanged ((int) value); });
+    setupToggle (mode, "mode",
+                 "STUDIO", "Best quality, ~75 ms latency. For recording and mixing.",
+                 "LIVE",   "Low latency (about half a note period). For playing live, single notes.");
+    setupToggle (width, "width",
+                 "MONO",   "Sums left and right, shifts once and outputs the same signal on both sides.",
+                 "STEREO", "Keeps the stereo image; both sides are shifted together.");
 
-    studioButton.setTooltip ("Best quality, ~75 ms latency. For recording and mixing.");
-    liveButton.setTooltip ("Low latency (about half a note period). For playing live, single notes.");
-
-    for (auto* b : { &studioButton, &liveButton })
-    {
-        b->setClickingTogglesState (false);
-        addAndMakeVisible (b);
-    }
-    studioButton.setConnectedEdges (juce::Button::ConnectedOnRight);
-    liveButton.setConnectedEdges (juce::Button::ConnectedOnLeft);
-    studioButton.onClick = [this] { modeAttachment->setValueAsCompleteGesture ((float) BassPitchShifterProcessor::studio); };
-    liveButton.onClick   = [this] { modeAttachment->setValueAsCompleteGesture ((float) BassPitchShifterProcessor::live); };
-
-    modeAttachment->sendInitialUpdate();
-
-    setSize (480, 230);
+    setSize (540, 230);
 }
 
 BassPitchShifterEditor::~BassPitchShifterEditor()
@@ -133,12 +120,29 @@ void BassPitchShifterEditor::setupKnob (Knob& k, const juce::String& paramId, co
     k.attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (processor.apvts, paramId, k.slider);
 }
 
-void BassPitchShifterEditor::modeChanged (int newMode)
+void BassPitchShifterEditor::setupToggle (Toggle& t, const juce::String& paramId,
+                                          const juce::String& firstText, const juce::String& firstTip,
+                                          const juce::String& secondText, const juce::String& secondTip)
 {
-    mode = newMode;
-    studioButton.setToggleState (mode == BassPitchShifterProcessor::studio, juce::dontSendNotification);
-    liveButton.setToggleState (mode == BassPitchShifterProcessor::live, juce::dontSendNotification);
-    repaint();
+    t.first.setButtonText (firstText);
+    t.second.setButtonText (secondText);
+    t.first.setTooltip (firstTip);
+    t.second.setTooltip (secondTip);
+    t.first.setConnectedEdges (juce::Button::ConnectedOnRight);
+    t.second.setConnectedEdges (juce::Button::ConnectedOnLeft);
+    addAndMakeVisible (t.first);
+    addAndMakeVisible (t.second);
+
+    t.attachment = std::make_unique<juce::ParameterAttachment> (*processor.apvts.getParameter (paramId),
+        [&t] (float value)
+        {
+            t.first.setToggleState ((int) value == 0, juce::dontSendNotification);
+            t.second.setToggleState ((int) value == 1, juce::dontSendNotification);
+        });
+
+    t.first.onClick  = [&t] { t.attachment->setValueAsCompleteGesture (0.0f); };
+    t.second.onClick = [&t] { t.attachment->setValueAsCompleteGesture (1.0f); };
+    t.attachment->sendInitialUpdate();
 }
 
 void BassPitchShifterEditor::paint (juce::Graphics& g)
@@ -150,20 +154,16 @@ void BassPitchShifterEditor::paint (juce::Graphics& g)
     g.setFont (juce::FontOptions (16.0f, juce::Font::bold));
     g.drawText ("BASS PITCH SHIFTER", header, juce::Justification::centredLeft);
 
-    g.setColour (Colours::dimText);
-    g.setFont (juce::FontOptions (12.0f));
-    g.drawText (mode == BassPitchShifterProcessor::live ? "low latency" : "~75 ms latency",
-                header.withTrimmedRight (164), juce::Justification::centredRight);
-
     g.setColour (Colours::panel);
     g.fillRoundedRectangle (getLocalBounds().withTrimmedTop (40).reduced (12).toFloat(), 8.0f);
 }
 
 void BassPitchShifterEditor::resized()
 {
-    auto modeArea = getLocalBounds().removeFromTop (40).reduced (16, 9).removeFromRight (150);
-    studioButton.setBounds (modeArea.removeFromLeft (modeArea.getWidth() / 2));
-    liveButton.setBounds (modeArea);
+    auto header = getLocalBounds().removeFromTop (40).reduced (16, 9);
+    mode.setBounds (header.removeFromRight (136));
+    header.removeFromRight (10);
+    width.setBounds (header.removeFromRight (136));
 
     auto area = getLocalBounds().withTrimmedTop (40).reduced (20, 18);
 

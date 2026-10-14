@@ -29,16 +29,29 @@ private:
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
     };
 
+    /** Two-way segmented switch bound to a two-option choice parameter. */
+    struct Toggle
+    {
+        juce::TextButton first, second;
+        std::unique_ptr<juce::ParameterAttachment> attachment;
+
+        void setBounds (juce::Rectangle<int> r)
+        {
+            first.setBounds (r.removeFromLeft (r.getWidth() / 2));
+            second.setBounds (r);
+        }
+    };
+
     void setupKnob (Knob&, const juce::String& paramId, const juce::String& name, double defaultValue);
-    void modeChanged (int newMode);
+    void setupToggle (Toggle&, const juce::String& paramId,
+                      const juce::String& firstText, const juce::String& firstTip,
+                      const juce::String& secondText, const juce::String& secondTip);
 
     BassPitchShifterProcessor& processor;
     MinimalLookAndFeel lnf;
     Knob pitch, fine, mix, output;
 
-    juce::TextButton studioButton { "STUDIO" }, liveButton { "LIVE" };
-    std::unique_ptr<juce::ParameterAttachment> modeAttachment;
-    int mode = BassPitchShifterProcessor::live;
+    Toggle mode, width;
     juce::TooltipWindow tooltips { this, 600 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BassPitchShifterEditor)
