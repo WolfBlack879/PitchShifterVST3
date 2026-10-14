@@ -6,9 +6,9 @@
 #include <vector>
 
 /**
-    Mono phase-vocoder pitch shifter with peak (identity) phase locking,
-    after Laroche & Dolson, "New phase-vocoder techniques for pitch-shifting,
-    harmonizing and other exotic effects" (WASPAA 1999).
+    Stereo-linked phase-vocoder pitch shifter with peak (identity) phase
+    locking, after Laroche & Dolson, "New phase-vocoder techniques for
+    pitch-shifting, harmonizing and other exotic effects" (WASPAA 1999).
 
     - A long FFT (4096 at 44.1/48 kHz) with 8x overlap gives enough frequency
       resolution to track low bass notes (down to ~30 Hz).
@@ -16,6 +16,10 @@
       (its "region") are moved as one block to the new frequency and rotated
       by a single phase, so each harmonic keeps its shape and stays coherent.
       This avoids the "phasey" sound of naive bin-by-bin shifting.
+    - Peaks, regions and phase rotations are computed once from the mid
+      (L+R) spectrum and applied identically to every channel. Processing the
+      channels independently lets them drift apart, which you hear as the
+      sound wandering between left and right.
 
     Latency is fftSize - hopSize samples. The processor reports it to the host
     and delays the dry signal by the same amount so the Mix knob stays phase
@@ -24,6 +28,9 @@
 class PitchShifter
 {
 public:
+    static constexpr int maxChannels = 2;
+    static constexpr int overlap = 8;
+
     /** Pick an FFT size that keeps roughly the same time/frequency resolution
         regardless of sample rate. */
     static int fftOrderForSampleRate (double sampleRate)
@@ -32,8 +39,6 @@ public:
         if (sampleRate <= 100000.0) return 13; // 8192
         return 14;                             // 16384
     }
-
-    static constexpr int overlap = 8;
 
     void prepare (double sampleRate)
     {
@@ -57,13 +62,16 @@ public:
             sumSq += (double) w * (double) w;
         outputGain = (float) ((double) fftSize / (sumSq * (double) overlap));
 
-        inFifo.assign ((size_t) fftSize, 0.0f);
-        outFifo.assign ((size_t) fftSize, 0.0f);
-        outAccum.assign ((size_t) (2 * fftSize), 0.0f);
-        fftBuffer.assign ((size_t) (2 * fftSize), 0.0f);
+        for (auto& c : channels)
+        {
+            c.inFifo.assign ((size_t) fftSize, 0.0f);
+            c.outFifo.assign ((size_t) fftSize, 0.0f);
+            c.outAccum.assign ((size_t) (2 * fftSize), 0.0f);
+            c.spectrum.assign ((size_t) numBins, {});
+            c.output.assign ((size_t) numBins, {});
+        }
 
-        spectrum.assign ((size_t) numBins, {});
-        output.assign ((size_t) numBins, {});
+        fftBuffer.assign ((size_t) (2 * fftSize), 0.0f);
         magnitude.assign ((size_t) numBins, 0.0f);
         phase.assign ((size_t) numBins, 0.0);
         lastPhase.assign ((size_t) numBins, 0.0);
@@ -76,9 +84,12 @@ public:
 
     void reset()
     {
-        std::fill (inFifo.begin(), inFifo.end(), 0.0f);
-        std::fill (outFifo.begin(), outFifo.end(), 0.0f);
-        std::fill (outAccum.begin(), outAccum.end(), 0.0f);
+        for (auto& c : channels)
+        {
+            std::fill (c.inFifo.begin(), c.inFifo.end(), 0.0f);
+            std::fill (c.outFifo.begin(), c.outFifo.end(), 0.0f);
+            std::fill (c.outAccum.begin(), c.outAccum.end(), 0.0f);
+        }
         std::fill (lastPhase.begin(), lastPhase.end(), 0.0);
         std::fill (rotation.begin(), rotation.end(), 0.0);
         std::fill (prevRotation.begin(), prevRotation.end(), 0.0);
@@ -90,12 +101,19 @@ public:
 
     int getLatencySamples() const noexcept { return latency; }
 
-    void process (float* samples, int numSamples) noexcept
+    /** Processes up to maxChannels channels in place, all shifted together. */
+    void process (float* const* samples, int numChannelsToProcess, int numSamples) noexcept
     {
+        numActive = juce::jlimit (1, maxChannels, numChannelsToProcess);
+
         for (int i = 0; i < numSamples; ++i)
         {
-            inFifo[(size_t) rover] = samples[i];
-            samples[i] = outFifo[(size_t) (rover - latency)];
+            for (int ch = 0; ch < numActive; ++ch)
+            {
+                auto& c = channels[ch];
+                c.inFifo[(size_t) rover] = samples[ch][i];
+                samples[ch][i] = c.outFifo[(size_t) (rover - latency)];
+            }
 
             if (++rover >= fftSize)
             {
@@ -105,7 +123,20 @@ public:
         }
     }
 
+    /** Mono convenience overload. */
+    void process (float* samples, int numSamples) noexcept
+    {
+        float* chans[] = { samples };
+        process (chans, 1, numSamples);
+    }
+
 private:
+    struct Channel
+    {
+        std::vector<float> inFifo, outFifo, outAccum;
+        std::vector<std::complex<float>> spectrum, output;
+    };
+
     static double wrapPhase (double p) noexcept
     {
         const double twoPi = juce::MathConstants<double>::twoPi;
@@ -116,20 +147,30 @@ private:
     {
         const double r = (double) ratio;
 
-        // ---- Analysis ------------------------------------------------------
-        for (int i = 0; i < fftSize; ++i)
-            fftBuffer[(size_t) i] = inFifo[(size_t) i] * window[(size_t) i];
-        std::fill (fftBuffer.begin() + fftSize, fftBuffer.end(), 0.0f);
+        // ---- Analysis (per channel) ----------------------------------------
+        for (int ch = 0; ch < numActive; ++ch)
+        {
+            auto& c = channels[ch];
+            for (int i = 0; i < fftSize; ++i)
+                fftBuffer[(size_t) i] = c.inFifo[(size_t) i] * window[(size_t) i];
+            std::fill (fftBuffer.begin() + fftSize, fftBuffer.end(), 0.0f);
 
-        fft->performRealOnlyForwardTransform (fftBuffer.data(), true);
+            fft->performRealOnlyForwardTransform (fftBuffer.data(), true);
 
+            for (int k = 0; k < numBins; ++k)
+                c.spectrum[(size_t) k] = { fftBuffer[(size_t) (2 * k)], fftBuffer[(size_t) (2 * k + 1)] };
+        }
+
+        // ---- Mid spectrum drives every decision ------------------------------
         float maxMag = 0.0f;
         for (int k = 0; k < numBins; ++k)
         {
-            const std::complex<float> c { fftBuffer[(size_t) (2 * k)], fftBuffer[(size_t) (2 * k + 1)] };
-            spectrum[(size_t) k]  = c;
-            magnitude[(size_t) k] = std::abs (c);
-            phase[(size_t) k]     = std::arg (c);
+            std::complex<float> mid = channels[0].spectrum[(size_t) k];
+            for (int ch = 1; ch < numActive; ++ch)
+                mid += channels[ch].spectrum[(size_t) k];
+
+            magnitude[(size_t) k] = std::abs (mid);
+            phase[(size_t) k]     = std::arg (mid);
             maxMag = juce::jmax (maxMag, magnitude[(size_t) k]);
         }
 
@@ -146,7 +187,8 @@ private:
         }
 
         // ---- Shift each peak's region as one block ---------------------------
-        std::fill (output.begin(), output.end(), std::complex<float> {});
+        for (int ch = 0; ch < numActive; ++ch)
+            std::fill (channels[ch].output.begin(), channels[ch].output.end(), std::complex<float> {});
         std::fill (rotation.begin(), rotation.end(), 0.0);
 
         const int numPeaks = (int) peaks.size();
@@ -183,7 +225,8 @@ private:
                 rotation[(size_t) k] = rot;
                 const int target = k + shift;
                 if (target > 0 && target < numBins - 1)
-                    output[(size_t) target] += spectrum[(size_t) k] * rotator;
+                    for (int ch = 0; ch < numActive; ++ch)
+                        channels[ch].output[(size_t) target] += channels[ch].spectrum[(size_t) k] * rotator;
             }
 
             regionStart = regionEnd;
@@ -192,34 +235,37 @@ private:
         std::swap (rotation, prevRotation);
         std::copy (phase.begin(), phase.end(), lastPhase.begin());
 
-        // ---- Synthesis -----------------------------------------------------
-        for (int k = 0; k < numBins; ++k)
+        // ---- Synthesis + overlap-add (per channel) ---------------------------
+        for (int ch = 0; ch < numActive; ++ch)
         {
-            fftBuffer[(size_t) (2 * k)]     = output[(size_t) k].real();
-            fftBuffer[(size_t) (2 * k + 1)] = output[(size_t) k].imag();
+            auto& c = channels[ch];
+            for (int k = 0; k < numBins; ++k)
+            {
+                fftBuffer[(size_t) (2 * k)]     = c.output[(size_t) k].real();
+                fftBuffer[(size_t) (2 * k + 1)] = c.output[(size_t) k].imag();
+            }
+            std::fill (fftBuffer.begin() + 2 * numBins, fftBuffer.end(), 0.0f);
+
+            fft->performRealOnlyInverseTransform (fftBuffer.data());
+
+            for (int i = 0; i < fftSize; ++i)
+                c.outAccum[(size_t) i] += window[(size_t) i] * fftBuffer[(size_t) i] * outputGain;
+
+            std::copy (c.outAccum.begin(), c.outAccum.begin() + hopSize, c.outFifo.begin());
+            std::copy (c.outAccum.begin() + hopSize, c.outAccum.begin() + hopSize + fftSize, c.outAccum.begin());
+            std::copy (c.inFifo.begin() + hopSize, c.inFifo.end(), c.inFifo.begin());
         }
-        std::fill (fftBuffer.begin() + 2 * numBins, fftBuffer.end(), 0.0f);
-
-        fft->performRealOnlyInverseTransform (fftBuffer.data());
-
-        // ---- Overlap-add ---------------------------------------------------
-        for (int i = 0; i < fftSize; ++i)
-            outAccum[(size_t) i] += window[(size_t) i] * fftBuffer[(size_t) i] * outputGain;
-
-        std::copy (outAccum.begin(), outAccum.begin() + hopSize, outFifo.begin());
-        std::copy (outAccum.begin() + hopSize, outAccum.begin() + hopSize + fftSize, outAccum.begin());
-        std::copy (inFifo.begin() + hopSize, inFifo.end(), inFifo.begin());
     }
 
     std::unique_ptr<juce::dsp::FFT> fft;
 
-    int fftSize = 0, hopSize = 0, numBins = 0, latency = 0, rover = 0;
+    int fftSize = 0, hopSize = 0, numBins = 0, latency = 0, rover = 0, numActive = 1;
     double expectedPhaseAdvance = 0.0;
     float outputGain = 1.0f;
     float ratio = 1.0f;
 
-    std::vector<float> window, inFifo, outFifo, outAccum, fftBuffer, magnitude;
-    std::vector<std::complex<float>> spectrum, output;
+    Channel channels[maxChannels];
+    std::vector<float> window, fftBuffer, magnitude;
     std::vector<double> phase, lastPhase, rotation, prevRotation;
     std::vector<int> peaks;
 };

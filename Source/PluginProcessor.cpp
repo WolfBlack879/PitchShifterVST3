@@ -54,15 +54,13 @@ bool BassPitchShifterProcessor::isBusesLayoutSupported (const BusesLayout& layou
 
 void BassPitchShifterProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    for (auto& s : shifters)
-        s.prepare (sampleRate);
-    for (auto& s : liveShifters)
-        s.prepare (sampleRate);
+    shifter.prepare (sampleRate);
+    liveShifter.prepare (sampleRate);
 
     currentMode = (int) modeParam->load();
     setLatencySamples (latencyForMode (currentMode.load()));
 
-    const int latency = shifters[0].getLatencySamples();
+    const int latency = shifter.getLatencySamples();
 
     dryDelay.setMaximumDelayInSamples (latency + 1);
     dryDelay.prepare ({ sampleRate, (juce::uint32) samplesPerBlock, (juce::uint32) maxChannels });
@@ -81,7 +79,7 @@ int BassPitchShifterProcessor::latencyForMode (int mode) const
 {
     // Live mode's delay varies with the note (about half a period); report none
     // so the host doesn't hold back other tracks while you're playing.
-    return mode == live ? 0 : shifters[0].getLatencySamples();
+    return mode == live ? 0 : shifter.getLatencySamples();
 }
 
 void BassPitchShifterProcessor::handleAsyncUpdate()
@@ -91,7 +89,7 @@ void BassPitchShifterProcessor::handleAsyncUpdate()
 
 double BassPitchShifterProcessor::getTailLengthSeconds() const
 {
-    return getSampleRate() > 0.0 ? (double) shifters[0].getLatencySamples() / getSampleRate() : 0.0;
+    return getSampleRate() > 0.0 ? (double) shifter.getLatencySamples() / getSampleRate() : 0.0;
 }
 
 void BassPitchShifterProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -114,8 +112,8 @@ void BassPitchShifterProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     if (mode != currentMode)
     {
         currentMode = mode;
-        for (auto& s : shifters)     s.reset();
-        for (auto& s : liveShifters) s.reset();
+        shifter.reset();
+        liveShifter.reset();
         dryDelay.reset();
         triggerAsyncUpdate(); // latency must be changed off the audio thread
     }
@@ -132,8 +130,6 @@ void BassPitchShifterProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
         {
             // Live: dry stays undelayed, like an octave pedal.
             std::copy (in, in + numSamples, dry);
-            liveShifters[ch].setRatio (ratio);
-            liveShifters[ch].process (buffer.getWritePointer (ch), numSamples);
         }
         else
         {
@@ -143,9 +139,20 @@ void BassPitchShifterProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
                 dryDelay.pushSample (ch, in[i]);
                 dry[i] = dryDelay.popSample (ch);
             }
-            shifters[ch].setRatio (ratio);
-            shifters[ch].process (buffer.getWritePointer (ch), numSamples);
         }
+    }
+
+    // Both channels go through one stereo-linked engine so they shift together.
+    float* const* channels = buffer.getArrayOfWritePointers();
+    if (mode == live)
+    {
+        liveShifter.setRatio (ratio);
+        liveShifter.process (channels, numChannels, numSamples);
+    }
+    else
+    {
+        shifter.setRatio (ratio);
+        shifter.process (channels, numChannels, numSamples);
     }
 
     for (int i = 0; i < numSamples; ++i)

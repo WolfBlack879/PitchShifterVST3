@@ -6,7 +6,7 @@
 #include <vector>
 
 /**
-    Low-latency mono pitch shifter for live playing.
+    Low-latency, stereo-linked pitch shifter for live playing.
 
     A read head moves through a short delay line at `ratio` times the input
     speed, so its delay slowly grows (shifting down) or shrinks (shifting up).
@@ -22,10 +22,17 @@
     The delay stays between a few samples and one period of the note, so on
     average it's about half a period: ~12 ms on low E (41 Hz), ~6 ms on A2.
     It's designed for single notes; chords will warble.
+
+    Pitch detection and every splice decision use the mid (L+R) signal, and
+    all channels share the same read heads. If each channel spliced on its
+    own, the splices would land at different moments on each side and the
+    sound would appear to wander between left and right.
 */
 class LiveShifter
 {
 public:
+    static constexpr int maxChannels = 2;
+
     void prepare (double sampleRate)
     {
         sr = sampleRate;
@@ -36,7 +43,9 @@ public:
         int size = 1;
         while (size < 3 * maxPeriod + fadeMax + 64)
             size <<= 1;
-        buffer.assign ((size_t) size, 0.0f);
+        for (auto& b : buffers)
+            b.assign ((size_t) size, 0.0f);
+        midBuffer.assign ((size_t) size, 0.0f);
         mask = size - 1;
 
         // Pitch detection runs at ~11 kHz on a band-limited copy of the input.
@@ -63,7 +72,9 @@ public:
 
     void reset()
     {
-        std::fill (buffer.begin(), buffer.end(), 0.0f);
+        for (auto& b : buffers)
+            std::fill (b.begin(), b.end(), 0.0f);
+        std::fill (midBuffer.begin(), midBuffer.end(), 0.0f);
         std::fill (decBuffer.begin(), decBuffer.end(), 0.0f);
         for (auto& f : lowpass)
             f.reset();
@@ -85,10 +96,42 @@ public:
     double getCurrentDelay() const noexcept { return mainDelay; }
     double getDetectedPeriod() const noexcept { return period; }
 
+    /** Processes up to maxChannels channels in place, all shifted together. */
+    void process (float* const* samples, int numChannelsToProcess, int numSamples) noexcept
+    {
+        const int numCh = juce::jlimit (1, maxChannels, numChannelsToProcess);
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            float mid = 0.0f;
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                buffers[ch][(size_t) writePos] = samples[ch][i];
+                mid += samples[ch][i];
+            }
+            mid /= (float) numCh;
+            midBuffer[(size_t) writePos] = mid;
+
+            advanceHeads (mid);
+
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                const auto& buf = buffers[ch];
+                float out = read (buf, mainDelay);
+                if (fadeLen > 0)
+                    out = fadeGain * out + (1.0f - fadeGain) * read (buf, fadeDelay);
+                samples[ch][i] = out;
+            }
+
+            moveHeads();
+        }
+    }
+
+    /** Mono convenience overload. */
     void process (float* samples, int numSamples) noexcept
     {
-        for (int i = 0; i < numSamples; ++i)
-            samples[i] = processSample (samples[i]);
+        float* chans[] = { samples };
+        process (chans, 1, numSamples);
     }
 
 private:
@@ -96,12 +139,10 @@ private:
     static constexpr double maxFreq = 700.0;  // well above the top of a 24-fret bass
     static constexpr double minDelay = 3.0;   // room for 4-point interpolation
 
-    float processSample (float x) noexcept
+    /** Runs pitch tracking on the mid signal and decides whether to splice. */
+    void advanceHeads (float mid) noexcept
     {
-        buffer[(size_t) writePos] = x;
-        trackPitch (x);
-
-        const double advance = 1.0 - ratio; // how much each head's delay changes per sample
+        trackPitch (mid);
 
         if (fadeLen == 0)
         {
@@ -115,25 +156,26 @@ private:
                 startSplice (-period); // safety net if the period estimate jumped
         }
 
-        float out = read (mainDelay);
+        // Raised-cosine crossfade from the old head (fadeDelay) to the new one (mainDelay).
+        if (fadeLen > 0)
+            fadeGain = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::pi * (float) fadePos / (float) fadeLen);
+    }
+
+    void moveHeads() noexcept
+    {
+        const double advance = 1.0 - ratio; // how much each head's delay changes per sample
 
         if (fadeLen > 0)
         {
-            // Raised-cosine crossfade from the old head (fadeDelay) to the new one (mainDelay).
-            const float t = (float) fadePos / (float) fadeLen;
-            const float gNew = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::pi * t);
-            out = gNew * out + (1.0f - gNew) * read (fadeDelay);
-
             fadeDelay = juce::jmax (minDelay, fadeDelay + advance);
             if (++fadePos >= fadeLen)
                 fadeLen = 0;
         }
 
         mainDelay += advance;
-        mainDelay = juce::jlimit (minDelay, (double) (buffer.size() - 4), mainDelay);
+        mainDelay = juce::jlimit (minDelay, (double) (midBuffer.size() - 4), mainDelay);
 
         writePos = (writePos + 1) & mask;
-        return out;
     }
 
     int fadeLength() const noexcept
@@ -156,14 +198,14 @@ private:
         auto similarity = [&] (int offset)
         {
             const int b = a + offset;
-            if ((double) b < minDelay || b + len + 4 >= (int) buffer.size())
+            if ((double) b < minDelay || b + len + 4 >= (int) midBuffer.size())
                 return -1.0;
 
             double xy = 0.0, energy = 0.0;
             for (int j = 0; j < len; ++j)
             {
-                const double s1 = buffer[(size_t) ((writePos - a - j) & mask)];
-                const double s2 = buffer[(size_t) ((writePos - b - j) & mask)];
+                const double s1 = midBuffer[(size_t) ((writePos - a - j) & mask)];
+                const double s2 = midBuffer[(size_t) ((writePos - b - j) & mask)];
                 xy += s1 * s2;
                 energy += s1 * s1 + s2 * s2;
             }
@@ -196,7 +238,7 @@ private:
     }
 
     /** 4-point Hermite read, `delay` samples behind the write position. */
-    float read (double delay) const noexcept
+    float read (const std::vector<float>& buffer, double delay) const noexcept
     {
         const int whole = (int) delay;
         const float frac = (float) (delay - (double) whole);
@@ -292,11 +334,12 @@ private:
 
     double sr = 44100.0, ratio = 1.0;
 
-    std::vector<float> buffer;
+    std::vector<float> buffers[maxChannels], midBuffer;
     int mask = 0, writePos = 0, maxPeriod = 0, fadeMax = 0;
 
     double period = 441.0, mainDelay = minDelay, fadeDelay = 0.0;
     int fadePos = 0, fadeLen = 0;
+    float fadeGain = 1.0f;
 
     juce::dsp::IIR::Filter<float> lowpass[2];
     std::vector<float> decBuffer, yinDiff;

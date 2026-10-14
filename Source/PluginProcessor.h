@@ -54,8 +54,8 @@ private:
     std::atomic<int> currentMode { live };
 
     static constexpr int maxChannels = 2;
-    PitchShifter shifters[maxChannels];     // studio: high quality, ~75 ms
-    LiveShifter liveShifters[maxChannels];  // live: pitch-synchronous, ~half a note period
+    PitchShifter shifter;     // studio: high quality, ~75 ms
+    LiveShifter liveShifter;  // live: pitch-synchronous, ~half a note period
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay;
 
     juce::AudioBuffer<float> dryBuffer;

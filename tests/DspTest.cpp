@@ -4,6 +4,7 @@
 #include "LiveShifter.h"
 #include <cstdio>
 #include <functional>
+#include <random>
 
 using Signal = std::vector<float>;
 constexpr double pi = juce::MathConstants<double>::pi;
@@ -185,6 +186,70 @@ static void runNoteChange (Engine& eng)
     }
 }
 
+/** Stereo bass line where R is slightly delayed/filtered/attenuated vs L (like a
+    stereo amp sim). The L/R balance must not wobble: if the channels were shifted
+    independently their splices would drift apart and the sound would pan around. */
+template <typename Shifter>
+static void runStereoImage (const char* name)
+{
+    const double sr = 48000.0;
+    const double notes[] = { 41.2, 55.0, 61.7, 49.0, 41.2, 73.4, 55.0, 46.2 };
+    const int noteLen = (int) (sr * 0.5), n = noteLen * 8;
+
+    Signal left ((size_t) n), right ((size_t) n);
+    double phase = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = (i % noteLen) / sr;
+        phase += 2.0 * pi * notes[i / noteLen] / sr;
+        double s = 0.0;
+        for (int h = 1; h <= 8; ++h)
+            s += std::sin (h * phase) / h * std::exp (-t * (1.5 + h));
+        left[(size_t) i] = (float) (0.4 * s);
+    }
+    std::mt19937 rng (1);
+    std::normal_distribution<float> noise (0.0f, 0.002f);
+    float lp = 0.0f;
+    for (int i = 0; i < n; ++i)
+    {
+        lp += 0.3f * ((i >= 9 ? left[(size_t) i - 9] : 0.0f) - lp);
+        right[(size_t) i] = 0.85f * lp + noise (rng);
+    }
+
+    std::printf ("\n== %s engine: stereo image stability ==\n", name);
+
+    for (const float semis : { -12.0f, -5.0f, 12.0f })
+    {
+        Signal l = left, r = right;
+        Shifter shifter;
+        shifter.prepare (sr);
+        shifter.setRatio (std::pow (2.0f, semis / 12.0f));
+        for (int pos = 0; pos < n; pos += 128)
+        {
+            float* chans[] = { l.data() + pos, r.data() + pos };
+            shifter.process (chans, 2, std::min (128, n - pos));
+        }
+
+        // L/R balance in 10 ms windows after the first second; report its biggest swing.
+        const int w = (int) (sr * 0.01);
+        std::vector<double> balance;
+        for (int p = (int) sr; p + w < n; p += w)
+        {
+            double el = 0.0, er = 0.0;
+            for (int i = p; i < p + w; ++i) { el += l[(size_t) i] * l[(size_t) i]; er += r[(size_t) i] * r[(size_t) i]; }
+            if (el > 1.0e-6 && er > 1.0e-6)
+                balance.push_back (10.0 * std::log10 (el / er));
+        }
+        double mean = 0.0, maxDev = 0.0;
+        for (double b : balance) mean += b;
+        mean /= (double) balance.size();
+        for (double b : balance) maxDev = std::max (maxDev, std::abs (b - mean));
+
+        check (maxDev < 3.0, "shift=%+4.0f st: L/R balance swing max %.2f dB",
+               semis, maxDev, 0.0, 0.0, 0.0, 0.0);
+    }
+}
+
 int main()
 {
     PitchShifter studio;
@@ -206,6 +271,8 @@ int main()
     runNoteChange (studioEngine);
     runSineCases (liveEngine, -30.0);
     runNoteChange (liveEngine);
+    runStereoImage<PitchShifter> ("Studio");
+    runStereoImage<LiveShifter> ("Live");
 
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
