@@ -10,12 +10,39 @@ A minimal pitch-shifter plugin tuned for bass guitar and synth bass.
 | Fine   | −100 … +100 ct   | Fine tune in cents                               |
 | Mix    | 0 … 100 %        | Dry/wet blend (dry is latency-aligned, no combing) |
 | Output | −24 … +12 dB     | Output level                                     |
+| Studio / Live | switch    | Choose the engine (see below)                    |
 
 Double-click any knob to reset it.
 
+## Two modes
+
+| | **Live** (default) | **Studio** |
+|---|---|---|
+| Use it for | Playing live / monitoring through the plugin | Recording, re-amping, mixing |
+| Delay | About half a period of the note: ~6 ms on E2, ~12 ms on low E, ~16 ms on low B (worst case one full period) | Fixed 3584 samples (~75 ms at 48 kHz), compensated by the DAW |
+| Material | Single notes (chords will warble) | Single notes and chords |
+| Dry signal in Mix | Not delayed, like an octave pedal | Delayed to stay phase-aligned |
+
+Upward shifts in Live mode add a few ms more than downward shifts (the
+crossfade needs some headroom). Live mode reports 0 latency to the host so it
+doesn't hold back other tracks while you play.
+
+Total delay you hear live = this plugin + your audio interface's round trip,
+so also keep the buffer size small (64–128 samples) on stage.
+
 ## How it works
 
-`Source/PitchShifter.h` is a phase vocoder with peak phase locking
+**Live** — `Source/LiveShifter.h` is a pitch-synchronous delay-line shifter:
+
+- A read head moves through a short delay line at the pitch ratio. When it
+  runs out of room, it hands over to a new head exactly one period of the
+  note away, with a short crossfade. Because the jump is a whole period, the
+  splice lines up with the waveform and is close to inaudible.
+- The period comes from a YIN pitch detector on a low-passed, decimated copy
+  of the input (25–700 Hz), and each splice is fine-tuned to sub-sample
+  accuracy with a small cross-correlation search.
+
+**Studio** — `Source/PitchShifter.h` is a phase vocoder with peak phase locking
 (Laroche & Dolson, 1999):
 
 - Long FFT (4096 samples at 44.1/48 kHz, scaled up at higher rates) with 8×
@@ -25,9 +52,6 @@ Double-click any knob to reset it.
   "phasey" sound of naive bin-by-bin shifting.
 - The dry signal is delayed by the same latency so Mix blends in phase.
 
-**Latency:** 3584 samples (~75 ms at 48 kHz), reported to the host so it is
-compensated on playback. That's fine for mixing/recording, but noticeable if
-you monitor live through it.
 
 ## Building
 
@@ -53,6 +77,8 @@ push (Actions tab → latest run → Artifacts).
 
 ### DSP test
 
-`build/DspTest_artefacts/Release/DspTest` runs bass sine waves through the
-shifter at several sample rates/intervals and checks the output pitch (within
-5 cents) and level.
+`build/DspTest_artefacts/Release/DspTest` runs bass sine waves through both
+engines at several sample rates and intervals, checking output pitch (within
+5 cents), level and distortion (residual below −30 dB). It also prints Live
+mode's average and maximum delay, and checks that a harmonic-rich bass tone
+changing note is tracked correctly.

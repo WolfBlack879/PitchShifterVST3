@@ -30,10 +30,16 @@ private:
     };
 
     void setupKnob (Knob&, const juce::String& paramId, const juce::String& name, double defaultValue);
+    void modeChanged (int newMode);
 
     BassPitchShifterProcessor& processor;
     MinimalLookAndFeel lnf;
     Knob pitch, fine, mix, output;
+
+    juce::TextButton studioButton { "STUDIO" }, liveButton { "LIVE" };
+    std::unique_ptr<juce::ParameterAttachment> modeAttachment;
+    int mode = BassPitchShifterProcessor::live;
+    juce::TooltipWindow tooltips { this, 600 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BassPitchShifterEditor)
 };

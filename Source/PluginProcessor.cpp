@@ -11,6 +11,7 @@ BassPitchShifterProcessor::BassPitchShifterProcessor()
     centsParam     = apvts.getRawParameterValue ("cents");
     mixParam       = apvts.getRawParameterValue ("mix");
     outputParam    = apvts.getRawParameterValue ("output");
+    modeParam      = apvts.getRawParameterValue ("mode");
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout BassPitchShifterProcessor::createLayout()
@@ -37,6 +38,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout BassPitchShifterProcessor::c
         AudioParameterFloatAttributes().withLabel ("dB")
             .withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " dB"; })));
 
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "mode", 1 }, "Mode",
+        StringArray { "Studio", "Live" }, (int) live));
+
     return layout;
 }
 
@@ -52,9 +56,13 @@ void BassPitchShifterProcessor::prepareToPlay (double sampleRate, int samplesPer
 {
     for (auto& s : shifters)
         s.prepare (sampleRate);
+    for (auto& s : liveShifters)
+        s.prepare (sampleRate);
+
+    currentMode = (int) modeParam->load();
+    setLatencySamples (latencyForMode (currentMode.load()));
 
     const int latency = shifters[0].getLatencySamples();
-    setLatencySamples (latency);
 
     dryDelay.setMaximumDelayInSamples (latency + 1);
     dryDelay.prepare ({ sampleRate, (juce::uint32) samplesPerBlock, (juce::uint32) maxChannels });
@@ -67,6 +75,18 @@ void BassPitchShifterProcessor::prepareToPlay (double sampleRate, int samplesPer
     gainSmoothed.reset (sampleRate, 0.05);
     mixSmoothed.setCurrentAndTargetValue (mixParam->load() * 0.01f);
     gainSmoothed.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (outputParam->load()));
+}
+
+int BassPitchShifterProcessor::latencyForMode (int mode) const
+{
+    // Live mode's delay varies with the note (about half a period); report none
+    // so the host doesn't hold back other tracks while you're playing.
+    return mode == live ? 0 : shifters[0].getLatencySamples();
+}
+
+void BassPitchShifterProcessor::handleAsyncUpdate()
+{
+    setLatencySamples (latencyForMode (currentMode.load()));
 }
 
 double BassPitchShifterProcessor::getTailLengthSeconds() const
@@ -90,22 +110,42 @@ void BassPitchShifterProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     mixSmoothed.setTargetValue (mixParam->load() * 0.01f);
     gainSmoothed.setTargetValue (juce::Decibels::decibelsToGain (outputParam->load()));
 
+    const int mode = (int) modeParam->load();
+    if (mode != currentMode)
+    {
+        currentMode = mode;
+        for (auto& s : shifters)     s.reset();
+        for (auto& s : liveShifters) s.reset();
+        dryDelay.reset();
+        triggerAsyncUpdate(); // latency must be changed off the audio thread
+    }
+
     if (dryBuffer.getNumSamples() < numSamples)
         dryBuffer.setSize (maxChannels, numSamples, false, false, true);
 
-    // Delay the dry path by the shifter's latency so wet/dry stay aligned.
     for (int ch = 0; ch < numChannels; ++ch)
     {
         const float* in = buffer.getReadPointer (ch);
         float* dry = dryBuffer.getWritePointer (ch);
-        for (int i = 0; i < numSamples; ++i)
-        {
-            dryDelay.pushSample (ch, in[i]);
-            dry[i] = dryDelay.popSample (ch);
-        }
 
-        shifters[ch].setRatio (ratio);
-        shifters[ch].process (buffer.getWritePointer (ch), numSamples);
+        if (mode == live)
+        {
+            // Live: dry stays undelayed, like an octave pedal.
+            std::copy (in, in + numSamples, dry);
+            liveShifters[ch].setRatio (ratio);
+            liveShifters[ch].process (buffer.getWritePointer (ch), numSamples);
+        }
+        else
+        {
+            // Studio: delay the dry path by the shifter's latency so wet/dry stay aligned.
+            for (int i = 0; i < numSamples; ++i)
+            {
+                dryDelay.pushSample (ch, in[i]);
+                dry[i] = dryDelay.popSample (ch);
+            }
+            shifters[ch].setRatio (ratio);
+            shifters[ch].process (buffer.getWritePointer (ch), numSamples);
+        }
     }
 
     for (int i = 0; i < numSamples; ++i)

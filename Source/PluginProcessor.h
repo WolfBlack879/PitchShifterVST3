@@ -3,8 +3,10 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 #include "PitchShifter.h"
+#include "LiveShifter.h"
 
-class BassPitchShifterProcessor : public juce::AudioProcessor
+class BassPitchShifterProcessor : public juce::AudioProcessor,
+                                  private juce::AsyncUpdater
 {
 public:
     BassPitchShifterProcessor();
@@ -36,16 +38,24 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
+    enum Mode { studio = 0, live = 1 };
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+    void handleAsyncUpdate() override;
+    int latencyForMode (int mode) const;
 
     std::atomic<float>* semitonesParam = nullptr;
     std::atomic<float>* centsParam     = nullptr;
     std::atomic<float>* mixParam       = nullptr;
     std::atomic<float>* outputParam    = nullptr;
+    std::atomic<float>* modeParam      = nullptr;
+
+    std::atomic<int> currentMode { live };
 
     static constexpr int maxChannels = 2;
-    PitchShifter shifters[maxChannels];
+    PitchShifter shifters[maxChannels];     // studio: high quality, ~75 ms
+    LiveShifter liveShifters[maxChannels];  // live: pitch-synchronous, ~half a note period
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay;
 
     juce::AudioBuffer<float> dryBuffer;

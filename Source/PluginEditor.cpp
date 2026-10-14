@@ -21,6 +21,11 @@ MinimalLookAndFeel::MinimalLookAndFeel()
     setColour (juce::TextEditor::textColourId, Colours::text);
     setColour (juce::TextEditor::highlightColourId, Colours::accent.withAlpha (0.4f));
     setColour (juce::CaretComponent::caretColourId, Colours::accent);
+    setColour (juce::TextButton::buttonColourId, Colours::panel);
+    setColour (juce::TextButton::buttonOnColourId, Colours::accent);
+    setColour (juce::TextButton::textColourOffId, Colours::dimText);
+    setColour (juce::TextButton::textColourOnId, Colours::background);
+    setColour (juce::ComboBox::outlineColourId, Colours::track);
 }
 
 void MinimalLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
@@ -83,6 +88,26 @@ BassPitchShifterEditor::BassPitchShifterEditor (BassPitchShifterProcessor& p)
     setupKnob (mix,    "mix",       "MIX",    100.0);
     setupKnob (output, "output",    "OUTPUT", 0.0);
 
+    // Studio / Live switch, driven by the "mode" choice parameter.
+    auto* modeParam = processor.apvts.getParameter ("mode");
+    modeAttachment = std::make_unique<juce::ParameterAttachment> (*modeParam,
+        [this] (float value) { modeChanged ((int) value); });
+
+    studioButton.setTooltip ("Best quality, ~75 ms latency. For recording and mixing.");
+    liveButton.setTooltip ("Low latency (about half a note period). For playing live, single notes.");
+
+    for (auto* b : { &studioButton, &liveButton })
+    {
+        b->setClickingTogglesState (false);
+        addAndMakeVisible (b);
+    }
+    studioButton.setConnectedEdges (juce::Button::ConnectedOnRight);
+    liveButton.setConnectedEdges (juce::Button::ConnectedOnLeft);
+    studioButton.onClick = [this] { modeAttachment->setValueAsCompleteGesture ((float) BassPitchShifterProcessor::studio); };
+    liveButton.onClick   = [this] { modeAttachment->setValueAsCompleteGesture ((float) BassPitchShifterProcessor::live); };
+
+    modeAttachment->sendInitialUpdate();
+
     setSize (480, 230);
 }
 
@@ -108,6 +133,14 @@ void BassPitchShifterEditor::setupKnob (Knob& k, const juce::String& paramId, co
     k.attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (processor.apvts, paramId, k.slider);
 }
 
+void BassPitchShifterEditor::modeChanged (int newMode)
+{
+    mode = newMode;
+    studioButton.setToggleState (mode == BassPitchShifterProcessor::studio, juce::dontSendNotification);
+    liveButton.setToggleState (mode == BassPitchShifterProcessor::live, juce::dontSendNotification);
+    repaint();
+}
+
 void BassPitchShifterEditor::paint (juce::Graphics& g)
 {
     g.fillAll (Colours::background);
@@ -119,7 +152,8 @@ void BassPitchShifterEditor::paint (juce::Graphics& g)
 
     g.setColour (Colours::dimText);
     g.setFont (juce::FontOptions (12.0f));
-    g.drawText ("double-click to reset", header, juce::Justification::centredRight);
+    g.drawText (mode == BassPitchShifterProcessor::live ? "low latency" : "~75 ms latency",
+                header.withTrimmedRight (164), juce::Justification::centredRight);
 
     g.setColour (Colours::panel);
     g.fillRoundedRectangle (getLocalBounds().withTrimmedTop (40).reduced (12).toFloat(), 8.0f);
@@ -127,6 +161,10 @@ void BassPitchShifterEditor::paint (juce::Graphics& g)
 
 void BassPitchShifterEditor::resized()
 {
+    auto modeArea = getLocalBounds().removeFromTop (40).reduced (16, 9).removeFromRight (150);
+    studioButton.setBounds (modeArea.removeFromLeft (modeArea.getWidth() / 2));
+    liveButton.setBounds (modeArea);
+
     auto area = getLocalBounds().withTrimmedTop (40).reduced (20, 18);
 
     // Pitch gets the biggest knob; the rest share the remaining space.
