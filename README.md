@@ -87,4 +87,4 @@ changing note is tracked correctly.
 ### DISCLAIMER AND AI USE
 This is a personal project to have a minimalist, easy to use vst3 Pitch Shifter for bass. I haven't tested it on any other instrument yet.
 This was made using Claude Opus 5.5 because I needed something quite fast, and this was made in like... ten to twenty minutes or so.
-You are free to use it however you like. How it is now is fine for me, though, if you ever want another feature implemented, you can make a pull request of develop it on your own. I am not getting any revenue for doing this, or creating this vst.
+You are free to use it however you like. How it is now is fine for me, though, if you ever want another feature implemented, you can make a pull request and develop it on your own. I am not getting any revenue for doing this, or creating this vst.
